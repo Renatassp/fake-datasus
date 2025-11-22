@@ -1,0 +1,354 @@
+# ==============================================================================
+# JUNTAR BASES DO OPEN DATA SUS COM DADOS FICTÍCIOS
+# ==============================================================================
+# Este script adiciona dados fictícios de identificação (nome do paciente,
+# nome da mãe, data de nascimento e CNS) aos dados reais de vacinação e SINAN
+#
+# IMPORTANTE:
+# - Execute primeiro os scripts de download e geração de dados fictícios
+# - Os arquivos devem ter o mesmo número de linhas (ou serão ajustados)
+# - Este script processa VACINA e SINAN separadamente
+# ==============================================================================
+
+# Carregar pacotes
+library(readr)
+library(dplyr)
+
+# Aumentar tempo de processamento
+options(timeout = 3600)
+
+# ==============================================================================
+# CONFIGURAÇÕES - AJUSTE AQUI
+# ==============================================================================
+
+# Pasta base do projeto
+# AJUSTE para o caminho do SEU computador
+PASTA_BASE <- "~/projeto-vacina-dengue"
+
+# Pastas específicas
+PASTA_DADOS_VACINA <- file.path(PASTA_BASE, "dados_processados")
+PASTA_DADOS_SINAN <- file.path(PASTA_BASE, "dados_sinan")
+PASTA_FICTICIOS <- file.path(PASTA_BASE, "dados_ficticios")
+PASTA_SAIDA <- file.path(PASTA_BASE, "dados_finais")
+
+# Criar pasta de saída se não existir
+dir.create(PASTA_SAIDA, showWarnings = FALSE, recursive = TRUE)
+
+# ==============================================================================
+# PARTE 1: JUNTAR DADOS DE VACINAÇÃO COM NOMES FICTÍCIOS
+# ==============================================================================
+
+cat("\n")
+cat("==============================================================================\n")
+cat("  PARTE 1: JUNTAR DADOS DE VACINAÇÃO COM NOMES FICTÍCIOS\n")
+cat("==============================================================================\n")
+cat("\n")
+
+# Definir arquivos
+arquivo_nomes_vacina <- file.path(PASTA_FICTICIOS, "nomes_ficticios_vacina.csv")
+arquivo_dados_vacina <- file.path(PASTA_DADOS_VACINA, "dados_vacina_completo_2020_2025.csv")
+arquivo_saida_vacina <- file.path(PASTA_SAIDA, "base_vacina_ficticia_para_teste.csv")
+
+# 1.1 Verificar existência dos arquivos
+cat("[1.1] Verificando arquivos de vacinação...\n")
+
+if(!file.exists(arquivo_nomes_vacina)) {
+  stop(sprintf("\n ERRO: Arquivo não encontrado:\n   %s\n\n", arquivo_nomes_vacina),
+       "   Execute primeiro o script Python de geração de dados fictícios\n")
+}
+
+if(!file.exists(arquivo_dados_vacina)) {
+  stop(sprintf("\n ERRO: Arquivo não encontrado:\n   %s\n\n", arquivo_dados_vacina),
+       "   Execute primeiro os scripts de consolidação de dados de vacinação\n")
+}
+
+cat("✓ Arquivos encontrados\n\n")
+
+# 1.2 Ler dados
+cat("[1.2] Lendo dados de vacinação...\n")
+cat(" Aguarde, arquivos grandes podem demorar...\n\n")
+
+cat("  Lendo nomes fictícios...\n")
+nomes_ficticios_vacina <- read_csv(arquivo_nomes_vacina, show_col_types = FALSE)
+cat(sprintf("     %s registros\n", format(nrow(nomes_ficticios_vacina), big.mark = ",")))
+
+cat("  Lendo dados reais de vacinação...\n")
+dados_reais_vacina <- read_csv2(arquivo_dados_vacina, show_col_types = FALSE)
+cat(sprintf("     %s registros\n", format(nrow(dados_reais_vacina), big.mark = ",")))
+cat("\n")
+
+# 1.3 Verificar e ajustar número de linhas
+cat("[1.3] Verificando compatibilidade de linhas...\n")
+
+n_linhas_vacina <- nrow(dados_reais_vacina)
+n_ficticios_vacina <- nrow(nomes_ficticios_vacina)
+
+if(n_ficticios_vacina == n_linhas_vacina) {
+  cat(" Número de linhas compatível!\n\n")
+} else {
+  cat(sprintf(" AJUSTE NECESSÁRIO: %s → %s linhas\n\n", 
+              format(n_ficticios_vacina, big.mark = ","),
+              format(n_linhas_vacina, big.mark = ",")))
+  
+  # Se tiver MAIS linhas que o necessário
+  if(n_ficticios_vacina > n_linhas_vacina) {
+    cat("  Removendo duplicatas exatas...\n")
+    nomes_ficticios_vacina <- nomes_ficticios_vacina %>% distinct()
+    
+    # Se ainda tiver mais linhas, fazer amostragem SEM reposição
+    if(nrow(nomes_ficticios_vacina) > n_linhas_vacina) {
+      cat(sprintf("  Amostrando %s linhas (sem reposição)...\n", 
+                  format(n_linhas_vacina, big.mark = ",")))
+      set.seed(123)
+      nomes_ficticios_vacina <- nomes_ficticios_vacina %>% 
+        slice_sample(n = n_linhas_vacina, replace = FALSE)
+    }
+  }
+  
+  # Se tiver MENOS linhas, fazer amostragem COM reposição
+  if(nrow(nomes_ficticios_vacina) < n_linhas_vacina) {
+    qtd_faltante <- n_linhas_vacina - nrow(nomes_ficticios_vacina)
+    cat(sprintf("  Faltam %s linhas\n", format(qtd_faltante, big.mark = ",")))
+    cat("  Amostrando linhas adicionais (com reposição)...\n")
+    
+    set.seed(123)
+    linhas_extras <- nomes_ficticios_vacina %>% 
+      slice_sample(n = qtd_faltante, replace = TRUE)
+    
+    nomes_ficticios_vacina <- bind_rows(nomes_ficticios_vacina, linhas_extras)
+  }
+  
+  cat(sprintf("  Ajuste concluído: %s linhas\n\n", 
+              format(nrow(nomes_ficticios_vacina), big.mark = ",")))
+}
+
+# 1.4 Verificação final
+cat("[1.4] Verificação final...\n")
+
+if(nrow(nomes_ficticios_vacina) != nrow(dados_reais_vacina)) {
+  stop(" ERRO: Número de linhas incompatível após ajuste!")
+}
+
+cat(" Verificação OK - pronto para juntar\n\n")
+
+# 1.5 Juntar dataframes
+cat("[1.5] Juntando dados fictícios com dados reais...\n")
+
+base_vacina_ficticia <- bind_cols(nomes_ficticios_vacina, dados_reais_vacina)
+
+cat(sprintf(" Base criada: %s linhas x %s colunas\n\n",
+            format(nrow(base_vacina_ficticia), big.mark = ","),
+            ncol(base_vacina_ficticia)))
+
+# 1.6 Salvar
+cat("[1.6] Salvando arquivo final de vacinação...\n")
+cat("Salvando arquivo grande, pode demorar...\n")
+
+write_csv(base_vacina_ficticia, arquivo_saida_vacina)
+
+tamanho_mb <- file.size(arquivo_saida_vacina) / (1024^2)
+tamanho_gb <- tamanho_mb / 1024
+
+cat(sprintf("\n Arquivo salvo: %s\n", basename(arquivo_saida_vacina)))
+cat(sprintf("  Local: %s\n", arquivo_saida_vacina))
+
+if(tamanho_gb >= 1) {
+  cat(sprintf("  Tamanho: %.2f GB\n", tamanho_gb))
+} else {
+  cat(sprintf("  Tamanho: %.2f MB\n", tamanho_mb))
+}
+
+cat("\n")
+cat("==============================================================================\n")
+cat("  PARTE 1 CONCLUÍDA: BASE DE VACINAÇÃO COM DADOS FICTÍCIOS\n")
+cat("==============================================================================\n")
+cat(sprintf("Registros: %s\n", format(nrow(base_vacina_ficticia), big.mark = ",")))
+cat(sprintf("Variáveis totais: %d\n", ncol(base_vacina_ficticia)))
+cat("\nVariáveis fictícias adicionadas:\n")
+cat("  nome_paciente\n")
+cat("  nome_mae\n")
+cat("  data_nasc\n")
+cat("  numero_sus\n")
+cat("==============================================================================\n")
+cat("\n")
+
+# ==============================================================================
+# PARTE 2: JUNTAR DADOS DO SINAN COM NOMES FICTÍCIOS
+# ==============================================================================
+
+cat("\n")
+cat("==============================================================================\n")
+cat("  PARTE 2: JUNTAR DADOS DO SINAN COM NOMES FICTÍCIOS\n")
+cat("==============================================================================\n")
+cat("\n")
+
+# Definir arquivos
+arquivo_nomes_sinan <- file.path(PASTA_FICTICIOS, "nomes_ficticios_sinan.csv")
+arquivo_dados_sinan <- file.path(PASTA_DADOS_SINAN, "sinan_2024_filtrado.csv")
+arquivo_saida_sinan <- file.path(PASTA_SAIDA, "base_sinan_ficticia_para_teste.csv")
+
+# 2.1 Verificar existência dos arquivos
+cat("[2.1] Verificando arquivos do SINAN...\n")
+
+if(!file.exists(arquivo_nomes_sinan)) {
+  stop(sprintf("\n ERRO: Arquivo não encontrado:\n   %s\n\n", arquivo_nomes_sinan),
+       "   Execute primeiro o script Python de geração de dados fictícios\n")
+}
+
+if(!file.exists(arquivo_dados_sinan)) {
+  stop(sprintf("\n ERRO: Arquivo não encontrado:\n   %s\n\n", arquivo_dados_sinan),
+       "   Execute primeiro o script de download do SINAN\n")
+}
+
+cat(" Arquivos encontrados\n\n")
+
+# 2.2 Ler dados
+cat("[2.2] Lendo dados do SINAN...\n")
+cat(" Aguarde, arquivos grandes podem demorar...\n\n")
+
+cat("  Lendo nomes fictícios...\n")
+nomes_ficticios_sinan <- read_csv(arquivo_nomes_sinan, show_col_types = FALSE)
+cat(sprintf("    %s registros\n", format(nrow(nomes_ficticios_sinan), big.mark = ",")))
+
+cat("  Lendo dados reais do SINAN...\n")
+sinan_real <- read_csv2(arquivo_dados_sinan, show_col_types = FALSE)
+cat(sprintf("    %s registros\n", format(nrow(sinan_real), big.mark = ",")))
+cat("\n")
+
+# 2.3 Verificar e ajustar número de linhas
+cat("[2.3] Verificando compatibilidade de linhas...\n")
+
+n_linhas_sinan <- nrow(sinan_real)
+n_ficticios_sinan <- nrow(nomes_ficticios_sinan)
+
+if(n_ficticios_sinan == n_linhas_sinan) {
+  cat("✓ Número de linhas compatível!\n\n")
+} else {
+  cat(sprintf("️ AJUSTE NECESSÁRIO: %s → %s linhas\n\n", 
+              format(n_ficticios_sinan, big.mark = ","),
+              format(n_linhas_sinan, big.mark = ",")))
+  
+  # Se tiver MAIS linhas que o necessário
+  if(n_ficticios_sinan > n_linhas_sinan) {
+    cat("  Removendo duplicatas exatas...\n")
+    nomes_ficticios_sinan <- nomes_ficticios_sinan %>% distinct()
+    
+    # Se ainda tiver mais linhas, fazer amostragem SEM reposição
+    if(nrow(nomes_ficticios_sinan) > n_linhas_sinan) {
+      cat(sprintf("  Amostrando %s linhas (sem reposição)...\n", 
+                  format(n_linhas_sinan, big.mark = ",")))
+      set.seed(456)  # Seed diferente da vacinação
+      nomes_ficticios_sinan <- nomes_ficticios_sinan %>% 
+        slice_sample(n = n_linhas_sinan, replace = FALSE)
+    }
+  }
+  
+  # Se tiver MENOS linhas, fazer amostragem COM reposição
+  if(nrow(nomes_ficticios_sinan) < n_linhas_sinan) {
+    qtd_faltante <- n_linhas_sinan - nrow(nomes_ficticios_sinan)
+    cat(sprintf("  Faltam %s linhas\n", format(qtd_faltante, big.mark = ",")))
+    cat("  Amostrando linhas adicionais (com reposição)...\n")
+    
+    set.seed(456)
+    linhas_extras <- nomes_ficticios_sinan %>% 
+      slice_sample(n = qtd_faltante, replace = TRUE)
+    
+    nomes_ficticios_sinan <- bind_rows(nomes_ficticios_sinan, linhas_extras)
+  }
+  
+  cat(sprintf("  Ajuste concluído: %s linhas\n\n", 
+              format(nrow(nomes_ficticios_sinan), big.mark = ",")))
+}
+
+# 2.4 Verificação final
+cat("[2.4] Verificação final...\n")
+
+if(nrow(nomes_ficticios_sinan) != nrow(sinan_real)) {
+  stop("ERRO: Número de linhas incompatível após ajuste!")
+}
+
+cat("Verificação OK - pronto para juntar\n\n")
+
+# 2.5 Juntar dataframes
+cat("[2.5] Juntando dados fictícios com dados reais...\n")
+
+base_sinan_ficticia <- bind_cols(nomes_ficticios_sinan, sinan_real)
+
+cat(sprintf(" Base criada: %s linhas x %s colunas\n\n",
+            format(nrow(base_sinan_ficticia), big.mark = ","),
+            ncol(base_sinan_ficticia)))
+
+# 2.6 Salvar
+cat("[2.6] Salvando arquivo final do SINAN...\n")
+cat(" Salvando arquivo grande, pode demorar...\n")
+
+write_csv(base_sinan_ficticia, arquivo_saida_sinan)
+
+tamanho_mb <- file.size(arquivo_saida_sinan) / (1024^2)
+tamanho_gb <- tamanho_mb / 1024
+
+cat(sprintf("\n✓ Arquivo salvo: %s\n", basename(arquivo_saida_sinan)))
+cat(sprintf("  Local: %s\n", arquivo_saida_sinan))
+
+if(tamanho_gb >= 1) {
+  cat(sprintf("  Tamanho: %.2f GB\n", tamanho_gb))
+} else {
+  cat(sprintf("  Tamanho: %.2f MB\n", tamanho_mb))
+}
+
+cat("\n")
+cat("==============================================================================\n")
+cat(" PARTE 2 CONCLUÍDA: BASE DO SINAN COM DADOS FICTÍCIOS\n")
+cat("==============================================================================\n")
+cat(sprintf("Registros: %s\n", format(nrow(base_sinan_ficticia), big.mark = ",")))
+cat(sprintf("Variáveis totais: %d\n", ncol(base_sinan_ficticia)))
+cat("\nVariáveis fictícias adicionadas:\n")
+cat("  nome_paciente\n")
+cat("  nome_mae\n")
+cat("  data_nasc\n")
+cat("  numero_sus\n")
+cat("==============================================================================\n")
+cat("\n")
+
+# ==============================================================================
+# RESUMO FINAL GERAL
+# ==============================================================================
+
+cat("\n")
+cat("==============================================================================\n")
+cat(" PROCESSAMENTO COMPLETO - TODAS AS BASES CRIADAS!\n")
+cat("==============================================================================\n")
+cat("\n")
+cat("BASES FINAIS PARA TESTE DE LINKAGE:\n")
+cat("\n")
+cat("1  BASE DE VACINAÇÃO:\n")
+cat(sprintf("   Arquivo: %s\n", basename(arquivo_saida_vacina)))
+cat(sprintf("   Local: %s\n", arquivo_saida_vacina))
+cat(sprintf("   Registros: %s\n", format(nrow(base_vacina_ficticia), big.mark = ",")))
+cat(sprintf("   Variáveis: %d\n", ncol(base_vacina_ficticia)))
+cat("\n")
+cat("2 BASE SINAN:\n")
+cat(sprintf("   Arquivo: %s\n", basename(arquivo_saida_sinan)))
+cat(sprintf("   Local: %s\n", arquivo_saida_sinan))
+cat(sprintf("   Registros: %s\n", format(nrow(base_sinan_ficticia), big.mark = ",")))
+cat(sprintf("   Variáveis: %d\n", ncol(base_sinan_ficticia)))
+cat("\n")
+cat("==============================================================================\n")
+cat("\n")
+cat("CARACTERÍSTICAS DOS DADOS FICTÍCIOS:\n")
+cat(" 10% de overlap entre as bases\n")
+cat(" Inconsistências intencionais para teste de linkage:\n")
+cat("    Campos vazios: ~5-8%\n")
+cat("    Nomes abreviados: ~17-25%\n")
+cat("    Formatos de data divergentes: 5 tipos\n")
+cat("    CNS inválidos: ~3%\n")
+cat("    Duplicatas: ~5%\n")
+cat("    Variações de case: ~5%\n")
+cat("\n")
+cat(" PRÓXIMOS PASSOS:\n")
+cat("   Use estas bases para testar algoritmos de linkage\n")
+cat("   Compare resultados com o overlap conhecido (10%)\n")
+cat("   Avalie desempenho dos métodos com as inconsistências\n")
+cat("\n")
+cat("==============================================================================\n")
+cat("\n")
