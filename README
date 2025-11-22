@@ -1,0 +1,158 @@
+# Simulação de linkage em grandes bases de dados de saúde
+
+## Descrição
+
+Este projeto realiza o download e processamento de dados abertos do Open Data SUS e linkage de dados de vacinação contra dengue e notificações de casos de dengue do Open Data SUS, utilizando dados fictícios para variáveis sensíveis.
+
+## Objetivos
+
+- Baixar e processar dados de vacinação contra dengue (2020-2025)
+- Baixar e processar dados do SINAN de casos de dengue (2024)
+- Gerar bases fictícias com nome do paciente, nome da mãe, datas de nascimento e CNS para linkage
+- Criar bases de teste mantendo a estrutura original dos dados do Open Data SUS
+
+## Requisitos
+
+### R (>= 4.0)
+
+### Python (>= 3.8)
+
+## Estrutura do Projeto
+
+```
+projeto-vacina-dengue/
+├── README.md
+├── scripts/
+│   ├── R/
+│   │   ├── 01_download_vacina_mes.R
+│   │   ├── 02_consolidar_vacina_ano.R
+│   │   ├── 03_consolidar_vacina_completo.R
+│   │   ├── 04_download_sinan.R
+│   │   ├── 05_juntar_vacina_ficticios.R
+│   │   └── 06_juntar_sinan_ficticios.R
+│   └── Python/
+│       └── gerar_nomes_ficticios.py
+├── data/
+│   ├── raw/                        # Dados brutos (não versionados)
+│   ├── processed/                  # Dados processados
+│   └── fictitious/                 # Dados fictícios
+└── docs/
+    └── dicionario_variaveis.md
+```
+
+## Como Usar
+
+### 1. Baixando os dados do Open Data SUS
+
+Utilizando a linguagem R
+
+Os dados desse item 1 estão disponíveis no Open Data SUS e sofrem revisões, portanto as URL devem ser atualizadas todas as vezes que for rodar o códigos para ter acesso aos dados mais recentes.  
+
+### 1.1 Baixar Dados de Vacinação (2020-2025)
+#### 01_download_vacina_mes.R
+Execute para cada mês/ano desejado
+Clone o repositório e altere o caminho da URL que consta no site https://opendatasus.saude.gov.br/ para cada mês e rode mês a mês. O Open Data SUS disponibiliza os dados de vacinação geral por mês.
+
+### 1.2 Consolidar Dados por Ano de vacinação
+Consolidação dos dados de vaicnação contra a dengue que foram baixados mês a mês em arquivos por ano
+
+### 1.3 Consolidar Base Completa de vacinação (2020-2025)
+Consolidação dos dados de vaicnação contra a dengue em um único arquivo.
+
+### 1.4 Baixar e Processar Dados SINAN
+Baixar a processar os dados do Sinan disponíveis no site https://opendatasus.saude.gov.br/. A URL deve ser atualizada todas as vezes que rodar o site, pois as informações são revisadas.
+
+
+### 2. Criando arquivos com as variáveis fictícias
+
+Linguagem python
+
+### 2.1 Gerar dados sensíveis fictícios 
+
+Este script gera:
+- `nomes_ficticios_vacina.csv` (~6.1M registros, mesmo núemro de registros de vacinação no período 2020 a 2025)
+- `nomes_ficticios_sinan.csv` (~6.4M registros, mesmo número de registros de notificações de dengue no ano de 2024)
+- Cada um desses dois arquivos tem as variáveis: nome do paciente, nome da mãe, data de nascimento e número do Cartão SUS
+- 10% de overlap entre as bases
+- Inconsistências intencionais (duplicatas, abreviações, formatos divergentes nas datas, campos vazios, CNS inválidos)
+
+
+### 3. Juntar Bases do Open Data SUS com Dados Fictícios
+
+Linguagem R
+
+## Dados Gerados
+
+### Base de Vacinação
+- **Período**: Janeiro/2020 a Junho/2025
+- **Registros**: 6.126.278 milhões
+- **Filtro**: Apenas vacinas contra dengue (sg_vacina = "Dengue" ou "DNG")
+
+### Base SINAN
+- **Ano**: 2024
+- **Registros**: 6.382.906 milhões
+- **Filtro**: Notificações de dengue
+
+### Dados Fictícios
+- **Nome do paciente**: Gerado com Faker (pt_BR)
+- **Nome da mãe**: Gerado com Faker (pt_BR)
+- **Data de nascimento**: Entre 1920-2024
+- **CNS**: 15 dígitos válidos
+
+#### Inconsistências Inseridas (para teste de linkage)
+- Campos vazios: ~5-8%
+- Nomes abreviados: ~17-25%
+- Formatos de data divergentes: 5 formatos diferentes
+- CNS inválidos: ~3%
+- Duplicatas intencionais: ~5%
+- Variações de case: ~5%
+
+## Observações Importantes
+
+1. **Tamanho dos arquivos**: Os dados brutos são muito grandes (vários GB). Certifique-se de ter espaço em disco adequado.
+
+2. **Tempo de processamento**: O download e processamento podem levar várias horas, especialmente para a base completa.
+
+3. **Memória RAM**: Recomenda-se pelo menos 16GB de RAM para processar as bases completas.
+
+4. **Timeout**: Configurado para 3600 segundos (1 hora) para downloads grandes.
+
+5. **Dados sensíveis**: Este repositório NÃO contém dados reais de pacientes. Todas as variáveis identificadoras são fictícias.
+
+## Variáveis Principais
+
+### Vacinação
+- `co_paciente`: Código do paciente (original do SUS)
+- `dt_vacina`: Data da vacinação
+- `sg_vacina`: Sigla da vacina
+- `co_dose_vacina`: Código da dose
+- `nu_idade_paciente`: Idade do paciente
+
+### SINAN
+- `DT_NOTIFIC`: Data de notificação
+- `DT_SIN_PRI`: Data dos primeiros sintomas
+- `CLASSI_FIN`: Classificação final
+- `EVOLUCAO`: Evolução do caso
+
+## Contribuindo
+
+Contribuições são bem-vindas! Por favor:
+1. Faça um fork do projeto
+2. Crie uma branch para sua feature (`git checkout -b feature/AmazingFeature`)
+3. Commit suas mudanças (`git commit -m 'Add some AmazingFeature'`)
+4. Push para a branch (`git push origin feature/AmazingFeature`)
+5. Abra um Pull Request
+
+## Licença
+
+Este projeto está sob licença MIT. Os dados do Open Data SUS seguem as políticas de dados abertos do Ministério da Saúde.
+
+## Contato
+
+Para dúvidas ou sugestões, abra uma issue no GitHub.
+
+## Links Úteis
+
+- [Open Data SUS](https://opendatasus.saude.gov.br)
+- [Documentação data.table](https://rdatatable.gitlab.io/data.table/)
+- [Documentação Faker](https://faker.readthe
