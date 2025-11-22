@@ -1,0 +1,222 @@
+# ==============================================================================
+# CONSOLIDAR BASE COMPLETA DE VACINAÇÃO (2020-2025)
+# ==============================================================================
+# Este script junta todos os arquivos anuais de vacinação contra dengue
+# em um único arquivo consolidado
+#
+# Entrada: Arquivos anuais (dados_vacina_2020.csv, dados_vacina_2021.csv, etc)
+# Saída: Arquivo completo (dados_vacina_completo_2020_2025.csv)
+# ==============================================================================
+
+# Carregar pacotes
+library(dplyr)
+library(data.table)
+
+# Aumentar tempo de processamento
+options(timeout = 3600)
+
+# ==============================================================================
+# CONFIGURAÇÕES - AJUSTE AQUI
+# ==============================================================================
+
+# Anos a serem consolidados
+ANOS <- 2020:2025
+
+# Pasta onde estão os arquivos anuais consolidados
+# AJUSTE para o caminho do SEU computador
+PASTA_DADOS <- "~/projeto-vacina-dengue/dados_processados"
+
+# Pasta onde salvar o arquivo final (pode ser a mesma)
+PASTA_SAIDA <- "~/projeto-vacina-dengue/dados_processados"
+
+# ==============================================================================
+# PROCESSAMENTO
+# ==============================================================================
+
+cat("\n")
+cat("==============================================================================\n")
+cat("  CONSOLIDAR BASE COMPLETA DE VACINAÇÃO\n")
+cat(sprintf("  Período: %s a %s\n", min(ANOS), max(ANOS)))
+cat("==============================================================================\n")
+cat("\n")
+
+# Criar pasta de saída se não existir
+dir.create(PASTA_SAIDA, showWarnings = FALSE, recursive = TRUE)
+
+# 1. LISTAR ARQUIVOS DE TODOS OS ANOS
+cat("[1/5] Listando arquivos anuais...\n")
+
+# Padrão: dados_vacina_2020.csv, dados_vacina_2021.csv, etc
+arquivos_anos <- list.files(
+  path = PASTA_DADOS,
+  pattern = "dados_vacina_\\d{4}\\.csv$",
+  full.names = TRUE
+)
+
+# Verificar se encontrou arquivos
+if(length(arquivos_anos) == 0) {
+  stop(sprintf("\n ERRO: Nenhum arquivo anual encontrado!\n\n"),
+       sprintf("   Verifique se:\n"),
+       sprintf("   A pasta está correta: %s\n", PASTA_DADOS),
+       sprintf("   Os arquivos têm o padrão: dados_vacina_AAAA.csv\n"),
+       sprintf("   Você já executou o script 'Consolidar Dados por Ano'\n"))
+}
+
+cat(sprintf("✓ Arquivos encontrados: %d\n", length(arquivos_anos)))
+cat("\nArquivos que serão processados:\n")
+
+# Mostrar informações de cada arquivo
+for(arq in arquivos_anos) {
+  tamanho_mb <- file.size(arq) / (1024^2)
+  cat(sprintf("   %s (%.2f MB)\n", basename(arq), tamanho_mb))
+}
+cat("\n")
+
+# 2. FUNÇÃO PARA LER E ADICIONAR ANO
+cat("[2/5] Definindo função de leitura...\n")
+
+ler_com_ano <- function(arquivo) {
+  nome_arquivo <- basename(arquivo)
+  cat(sprintf("\n  Lendo: %s\n", nome_arquivo))
+  
+  # Ler arquivo
+  dados <- fread(arquivo, sep = ";")
+  
+  # Extrair ano do nome do arquivo
+  # Exemplo: dados_vacina_2020.csv → 2020
+  ano <- as.integer(gsub(".*dados_vacina_(\\d{4})\\.csv", "\\1", nome_arquivo))
+  dados$ano <- ano
+  
+  cat(sprintf("   Ano: %d\n", ano))
+  cat(sprintf("   Registros: %s\n", format(nrow(dados), big.mark = ",")))
+  cat(sprintf("   Variáveis: %d\n", ncol(dados)))
+  
+  return(dados)
+}
+
+cat("Função definida\n")
+
+# 3. LER E COMBINAR TODOS OS ARQUIVOS
+cat("\n[3/5] Lendo e combinando arquivos...\n")
+cat("Este processo pode demorar vários minutos (arquivos grandes)...\n")
+
+dados_vacina_completo <- rbindlist(lapply(arquivos_anos, ler_com_ano))
+
+cat("\n")
+cat("==============================================================================\n")
+cat(sprintf("✓ CONSOLIDAÇÃO CONCLUÍDA\n"))
+cat("==============================================================================\n")
+cat(sprintf("Total de registros: %s\n", format(nrow(dados_vacina_completo), big.mark = ",")))
+cat(sprintf("Total de variáveis: %d\n", ncol(dados_vacina_completo)))
+cat("==============================================================================\n")
+cat("\n")
+
+# 4. GERAR ESTATÍSTICAS
+cat("[4/5] Gerando estatísticas...\n\n")
+
+# Estatísticas por ano
+cat(" Contagem de registros por ano:\n")
+contagem_ano <- dados_vacina_completo[, .N, by = ano][order(ano)]
+print(contagem_ano)
+cat("\n")
+
+# Estatísticas por ano e mês (se a coluna 'mes' existir)
+if("mes" %in% names(dados_vacina_completo)) {
+  cat(" Contagem de registros por ano e mês:\n")
+  contagem_ano_mes <- dados_vacina_completo[, .N, by = .(ano, mes)][order(ano, mes)]
+  print(head(contagem_ano_mes, 20))  # Mostra primeiros 20
+  cat(sprintf("   ... (total de %d combinações ano-mês)\n\n", nrow(contagem_ano_mes)))
+  
+  # Salvar estatística detalhada
+  arquivo_contagem_mes <- file.path(PASTA_SAIDA, "contagem_ano_mes.csv")
+  fwrite(contagem_ano_mes, arquivo_contagem_mes, sep = ";")
+  cat(sprintf("✓ Estatística detalhada salva: %s\n\n", basename(arquivo_contagem_mes)))
+}
+
+# Salvar estatística por ano
+arquivo_contagem_ano <- file.path(PASTA_SAIDA, "contagem_por_ano.csv")
+fwrite(contagem_ano, arquivo_contagem_ano, sep = ";")
+cat(sprintf("✓ Estatística por ano salva: %s\n\n", basename(arquivo_contagem_ano)))
+
+# Verificar período de vacinação
+cat(" Período de vacinação:\n")
+cat(sprintf("  Primeiro ano: %d\n", min(dados_vacina_completo$ano)))
+cat(sprintf("  Último ano: %d\n", max(dados_vacina_completo$ano)))
+cat(sprintf("  Anos com dados: %d\n", length(unique(dados_vacina_completo$ano))))
+
+if("dt_vacina" %in% names(dados_vacina_completo)) {
+  # Tentar extrair datas válidas
+  datas_validas <- as.Date(dados_vacina_completo$dt_vacina, 
+                           format = "%Y-%m-%d", 
+                           optional = TRUE)
+  datas_validas <- datas_validas[!is.na(datas_validas)]
+  
+  if(length(datas_validas) > 0) {
+    cat(sprintf("  Data mais antiga: %s\n", min(datas_validas)))
+    cat(sprintf("  Data mais recente: %s\n", max(datas_validas)))
+  }
+}
+cat("\n")
+
+# Verificar variáveis
+cat(" Variáveis presentes:\n")
+cat(sprintf("  Total: %d variáveis\n", ncol(dados_vacina_completo)))
+cat("  Principais: ", paste(head(names(dados_vacina_completo), 10), collapse = ", "), "...\n\n")
+
+# 5. SALVAR ARQUIVO CONSOLIDADO COMPLETO
+cat("[5/5] Salvando arquivo consolidado completo...\n")
+cat("Salvando arquivo grande, pode demorar...\n")
+
+nome_arquivo_saida <- sprintf("dados_vacina_completo_%s_%s.csv", 
+                              min(ANOS), 
+                              max(ANOS))
+arquivo_saida <- file.path(PASTA_SAIDA, nome_arquivo_saida)
+
+fwrite(dados_vacina_completo, arquivo_saida, sep = ";")
+
+tamanho_mb <- file.size(arquivo_saida) / (1024^2)
+tamanho_gb <- tamanho_mb / 1024
+
+cat(sprintf("\n✓ Arquivo salvo: %s\n", nome_arquivo_saida))
+cat(sprintf("  Local: %s\n", arquivo_saida))
+
+if(tamanho_gb >= 1) {
+  cat(sprintf("  Tamanho: %.2f GB\n", tamanho_gb))
+} else {
+  cat(sprintf("  Tamanho: %.2f MB\n", tamanho_mb))
+}
+
+# RESUMO FINAL
+cat("\n")
+cat("==============================================================================\n")
+cat("  ✓ BASE COMPLETA CONSOLIDADA COM SUCESSO!\n")
+cat("==============================================================================\n")
+cat(sprintf("Período: %s a %s\n", min(ANOS), max(ANOS)))
+cat(sprintf("Total de registros: %s\n", 
+            format(nrow(dados_vacina_completo), big.mark = ",")))
+cat(sprintf("Anos processados: %d (%s)\n", 
+            length(unique(dados_vacina_completo$ano)),
+            paste(sort(unique(dados_vacina_completo$ano)), collapse = ", ")))
+cat(sprintf("Variáveis: %d\n", ncol(dados_vacina_completo)))
+cat(sprintf("\nArquivo final: %s\n", arquivo_saida))
+
+if(tamanho_gb >= 1) {
+  cat(sprintf("Tamanho: %.2f GB\n", tamanho_gb))
+} else {
+  cat(sprintf("Tamanho: %.2f MB\n", tamanho_mb))
+}
+
+cat("==============================================================================\n")
+cat("\n")
+
+# ==============================================================================
+# INFORMAÇÕES ADICIONAIS
+# ==============================================================================
+cat("PRÓXIMOS PASSOS:\n")
+cat("1. Este arquivo contém TODOS os dados de vacinação contra dengue\n")
+cat("2. Use este arquivo para análises e cruzamento com dados do SINAN\n")
+cat("3. Para adicionar dados fictícios, execute o próximo script:\n")
+cat("   'Juntar Bases do Open Data SUS com Dados Fictícios.R'\n")
+cat("\n")
+
+# cat("\n")
