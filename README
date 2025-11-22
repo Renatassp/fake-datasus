@@ -24,31 +24,26 @@ projeto-vacina-dengue/
 ├── README.md
 ├── scripts/
 │   ├── R/
-│   │   ├── 01_download_vacina_mes.R
-│   │   ├── 02_consolidar_vacina_ano.R
-│   │   ├── 03_consolidar_vacina_completo.R
-│   │   ├── 04_download_sinan.R
-│   │   ├── 05_juntar_vacina_ficticios.R
-│   │   └── 06_juntar_sinan_ficticios.R
+│   │   ├── Download Dados de Vacinação (2020-2025).R
+│   │   ├── Consolidar Dados por Ano de vacinação.R
+│   │   ├── Consolidar Base Completa de vacinação (2020-2025).R
+│   │   ├── Download e Processamento Dados SINAN.R
+│   │   └── Juntar Bases do Open Data SUS com Dados Fictícios.R
 │   └── Python/
-│       └── gerar_nomes_ficticios.py
-├── data/
-│   ├── raw/                        # Dados brutos (não versionados)
-│   ├── processed/                  # Dados processados
-│   └── fictitious/                 # Dados fictícios
+│       └── Gerar bases com dados sensíveis fictícios.py
 └── docs/
     └── dicionario_variaveis.md
 ```
 
 ## Como Usar
 
-### 1. Baixando os dados do Open Data SUS
+### 1. Download dos dados do Open Data SUS
 
 Utilizando a linguagem R
 
 Os dados desse item 1 estão disponíveis no Open Data SUS e sofrem revisões, portanto as URL devem ser atualizadas todas as vezes que for rodar o códigos para ter acesso aos dados mais recentes.  
 
-### 1.1 Baixar Dados de Vacinação (2020-2025)
+### 1.1 Download Dados de Vacinação (2020-2025)
 #### 01_download_vacina_mes.R
 Execute para cada mês/ano desejado
 Clone o repositório e altere o caminho da URL que consta no site https://opendatasus.saude.gov.br/ para cada mês e rode mês a mês. O Open Data SUS disponibiliza os dados de vacinação geral por mês.
@@ -59,7 +54,7 @@ Consolidação dos dados de vaicnação contra a dengue que foram baixados mês 
 ### 1.3 Consolidar Base Completa de vacinação (2020-2025)
 Consolidação dos dados de vaicnação contra a dengue em um único arquivo.
 
-### 1.4 Baixar e Processar Dados SINAN
+### 1.4 Download e Processamento Dados SINAN
 Baixar a processar os dados do Sinan disponíveis no site https://opendatasus.saude.gov.br/. A URL deve ser atualizada todas as vezes que rodar o site, pois as informações são revisadas.
 
 
