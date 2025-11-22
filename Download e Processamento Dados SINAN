@@ -1,0 +1,245 @@
+# ==============================================================================
+# DOWNLOAD E PROCESSAMENTO DADOS SINAN - DENGUE
+# ==============================================================================
+# Este script baixa e processa dados de notificações de dengue do SINAN
+# disponíveis no Open Data SUS
+#
+# IMPORTANTE:
+# Os dados do SINAN sofrem atualizações/revisões constantes
+# A URL deve ser verificada e atualizada no site antes do download
+# Execute este código para cada ano desejado
+#
+# URL do Open Data SUS: https://opendatasus.saude.gov.br/
+# ==============================================================================
+
+# Carregar pacotes necessários
+library(data.table)
+library(dplyr)
+
+# Aumentar tempo para download e extração (arquivo grande)
+options(timeout = 3600)
+
+# ==============================================================================
+# CONFIGURAÇÕES - AJUSTE AQUI
+# ==============================================================================
+
+# ATENÇÃO: Atualize estas informações antes de executar!
+
+# Ano desejado (exemplo: 2024)
+ANO <- 2024
+
+# URL do arquivo ZIP - ATUALIZE NO SITE DO OPEN DATA SUS!
+# Acesse: https://opendatasus.saude.gov.br/ 
+# Navegue: SINAN → Dengue → CSV
+# Copie a URL atualizada do ano desejado
+URL <- "https://arquivosdadosabertos.saude.gov.br/ftp/SINAN/Dengue/csv/DENGBR24.csv.zip"
+
+# Pasta onde salvar o arquivo processado
+# AJUSTE para o caminho do SEU computador
+PASTA_SAIDA <- "~/projeto-vacina-dengue/dados_sinan"
+
+# ==============================================================================
+# PROCESSAMENTO - NÃO PRECISA ALTERAR DAQUI PRA BAIXO
+# ==============================================================================
+
+cat("\n")
+cat("==============================================================================\n")
+cat(sprintf("  PROCESSANDO SINAN DENGUE: %s\n", ANO))
+cat("==============================================================================\n")
+cat(sprintf("URL: %s\n", URL))
+cat("\n")
+
+# Criar pasta de saída se não existir
+dir.create(PASTA_SAIDA, showWarnings = FALSE, recursive = TRUE)
+
+# 1. DOWNLOAD DO ARQUIVO
+cat("[1/7] Baixando arquivo ZIP do SINAN...\n")
+cat("Este arquivo é grande, pode demorar vários minutos...\n")
+
+temp_dir <- tempdir()
+nome_zip <- sprintf("DENGBR%02d.csv.zip", ANO %% 100)
+temp_zip <- file.path(temp_dir, nome_zip)
+
+download.file(URL, temp_zip, mode = "wb")
+cat(" Download concluído\n\n")
+
+# 2. EXTRAIR CSV DO ZIP
+cat("[2/7] Extraindo arquivo CSV...\n")
+arquivos_no_zip <- unzip(temp_zip, list = TRUE)
+csv_file <- arquivos_no_zip$Name[grepl("\\.csv$", arquivos_no_zip$Name)]
+temp_csv <- unzip(temp_zip, files = csv_file, exdir = temp_dir)
+cat("✓ Arquivo extraído\n\n")
+
+# 3. LER DADOS
+cat("[3/7] Lendo dados do SINAN...\n")
+cat("Aguarde, este processo pode demorar vários minutos...\n")
+
+sinan <- fread(temp_csv, encoding = "Latin-1") %>%
+  mutate(across(where(is.character), ~ iconv(., from = "Latin1", to = "UTF-8")))
+
+cat(sprintf("✓ Total de registros lidos: %s\n", format(nrow(sinan), big.mark = ",")))
+cat(sprintf("✓ Total de variáveis: %d\n\n", ncol(sinan)))
+
+# Verificar variáveis disponíveis
+cat("Primeiras 20 variáveis:\n")
+print(head(colnames(sinan), 20))
+cat("...\n\n")
+
+# 4. PROCESSAR VARIÁVEL DE IDADE
+cat("[4/7] Processando variável de idade (NU_IDADE_N)...\n")
+
+# Transformar código de idade em idade numérica
+# No SINAN, alguns códigos começam com "4" indicando anos
+sinan_filtrado <- sinan %>%
+  mutate(
+    NU_IDADE_N = if_else(
+      substr(as.character(NU_IDADE_N), 1, 1) == "4",
+      substr(as.character(NU_IDADE_N), 3, 4),
+      as.character(NU_IDADE_N)
+    ),
+    NU_IDADE_N = as.numeric(NU_IDADE_N)
+  )
+
+cat("Variável transformada\n")
+
+# Verificar distribuição de idades
+cat("\nEstatísticas de idade:\n")
+cat(sprintf("  Mínimo: %d\n", min(sinan_filtrado$NU_IDADE_N, na.rm = TRUE)))
+cat(sprintf("  Máximo: %d\n", max(sinan_filtrado$NU_IDADE_N, na.rm = TRUE)))
+cat(sprintf("  Média: %.1f\n", mean(sinan_filtrado$NU_IDADE_N, na.rm = TRUE)))
+cat(sprintf("  Mediana: %.0f\n", median(sinan_filtrado$NU_IDADE_N, na.rm = TRUE)))
+cat(sprintf("  Valores ausentes: %s\n", 
+            format(sum(is.na(sinan_filtrado$NU_IDADE_N)), big.mark = ",")))
+
+# Verificar valores únicos (primeiros 20)
+valores_unicos <- sort(unique(sinan_filtrado$NU_IDADE_N))
+cat(sprintf("\nPrimeiros valores únicos de idade: %s\n", 
+            paste(head(valores_unicos, 20), collapse = ", ")))
+cat("\n")
+
+# 5. IDENTIFICAR E REMOVER INCONSISTÊNCIAS
+cat("[5/7] Identificando e removendo inconsistências...\n")
+
+# Contar registros com idade > 100 (inconsistente)
+n_inconsistentes <- sum(sinan_filtrado$NU_IDADE_N > 100, na.rm = TRUE)
+pct_inconsistentes <- (n_inconsistentes / nrow(sinan_filtrado)) * 100
+
+cat(sprintf("Registros com idade > 100: %s (%.2f%%)\n", 
+            format(n_inconsistentes, big.mark = ","),
+            pct_inconsistentes))
+
+# Remover inconsistências
+sinan_filtrado <- sinan_filtrado[NU_IDADE_N <= 100 | is.na(NU_IDADE_N), ]
+
+cat(sprintf("✓ Registros após limpeza: %s\n", 
+            format(nrow(sinan_filtrado), big.mark = ",")))
+cat(sprintf("  Removidos: %s registros inconsistentes\n", 
+            format(n_inconsistentes, big.mark = ",")))
+cat("\n")
+
+# 6. SELECIONAR VARIÁVEIS DE INTERESSE
+cat("[6/7] Selecionando variáveis de interesse...\n")
+
+# Lista completa de variáveis conforme especificado
+variaveis_interesse <- c(
+  "ID_AGRAVO", "DT_NOTIFIC", "NU_ANO", "SG_UF_NOT", "ID_MUNICIP", "ID_UNIDADE",
+  "DT_SIN_PRI", "ANO_NASC", "NU_IDADE_N", "CS_SEXO", "CS_GESTANT", "CS_RACA",
+  "CS_ESCOL_N", "SG_UF", "ID_MN_RESI", "ID_PAIS", "DT_INVEST", "FEBRE", "MIALGIA",
+  "CEFALEIA", "EXANTEMA", "VOMITO", "NAUSEA", "DOR_COSTAS", "CONJUNTVIT",
+  "ARTRITE", "ARTRALGIA", "PETEQUIA_N", "LEUCOPENIA", "LACO", "DOR_RETRO", "DIABETES",
+  "HEMATOLOG", "HEPATOPAT", "RENAL", "HIPERTENSA", "ACIDO_PEPT", "AUTO_IMUNE",
+  "RESUL_PRNT", "DT_SORO", "RESUL_SORO", "DT_NS1", "RESUL_NS1", "DT_VIRAL", "RESUL_VI_N",
+  "DT_PCR", "RESUL_PCR_", "SOROTIPO", "HISTOPA_N", "IMUNOH_N", "HOSPITALIZ", "DT_INTERNA",
+  "UF", "MUNICIPIO", "TPAUTOCTO", "COUFINF", "COPAISINF", "COMUNINF", "CLASSI_FIN",
+  "CRITERIO", "EVOLUCAO", "DT_OBITO", "DT_ENCERRA", "ALRM_HIPOT", "ALRM_PLAQ",
+  "ALRM_VOM", "ALRM_SANG", "ALRM_HEMAT", "ALRM_ABDOM", "ALRM_LETAR", "ALRM_HEPAT",
+  "ALRM_LIQ", "DT_ALRM", "GRAV_PULSO", "GRAV_CONV", "GRAV_ENCH", "GRAV_INSUF",
+  "GRAV_TAQUI", "GRAV_EXTRE", "GRAV_HIPOT", "GRAV_HEMAT", "GRAV_MELEN",
+  "GRAV_METRO", "GRAV_SANG", "GRAV_AST", "GRAV_MIOC", "GRAV_CONSC", "GRAV_ORGAO",
+  "DT_GRAV", "MANI_HEMOR", "EPISTAXE", "GENGIVO", "METRO", "PETEQUIAS", "HEMATURA",
+  "SANGRAM", "LACO_N", "PLASMATICO", "EVIDENCIA", "PLAQ_MENOR", "CON_FHD", "COMPLICA",
+  "TP_SISTEMA", "NDUPLIC_N"
+)
+
+# Verificar quais variáveis existem no arquivo
+variaveis_existentes <- variaveis_interesse[variaveis_interesse %in% names(sinan_filtrado)]
+variaveis_faltantes <- variaveis_interesse[!variaveis_interesse %in% names(sinan_filtrado)]
+
+cat(sprintf("Total de variáveis solicitadas: %d\n", length(variaveis_interesse)))
+cat(sprintf("Variáveis encontradas: %d\n", length(variaveis_existentes)))
+
+if(length(variaveis_faltantes) > 0) {
+  cat(sprintf("\n Variáveis não encontradas (%d):\n", length(variaveis_faltantes)))
+  cat("  ", paste(head(variaveis_faltantes, 10), collapse = ", "))
+  if(length(variaveis_faltantes) > 10) {
+    cat(sprintf(", ... (e mais %d)", length(variaveis_faltantes) - 10))
+  }
+  cat("\n")
+  cat("  (Estas variáveis podem ter sido renomeadas ou removidas no arquivo)\n\n")
+}
+
+# Selecionar apenas variáveis existentes
+sinan_filtrado <- sinan_filtrado %>%
+  select(all_of(variaveis_existentes))
+
+cat(sprintf("✓ Variáveis selecionadas: %d\n\n", ncol(sinan_filtrado)))
+
+# 7. SALVAR ARQUIVO
+cat("[7/7] Salvando arquivo processado...\n")
+
+nome_arquivo_saida <- sprintf("sinan_%s_filtrado.csv", ANO)
+arquivo_saida <- file.path(PASTA_SAIDA, nome_arquivo_saida)
+
+fwrite(sinan_filtrado, arquivo_saida, sep = ";")
+
+tamanho_mb <- file.size(arquivo_saida) / (1024^2)
+tamanho_gb <- tamanho_mb / 1024
+
+cat(sprintf("✓ Arquivo salvo: %s\n", nome_arquivo_saida))
+cat(sprintf("  Local: %s\n", arquivo_saida))
+
+if(tamanho_gb >= 1) {
+  cat(sprintf("  Tamanho: %.2f GB\n", tamanho_gb))
+} else {
+  cat(sprintf("  Tamanho: %.2f MB\n", tamanho_mb))
+}
+
+cat(sprintf("  Linhas: %s\n", format(nrow(sinan_filtrado), big.mark = ",")))
+cat(sprintf("  Colunas: %d\n", ncol(sinan_filtrado)))
+
+# Limpar arquivos temporários
+unlink(temp_zip)
+unlink(temp_csv)
+
+# RESUMO FINAL
+cat("\n")
+cat("==============================================================================\n")
+cat(sprintf("  PROCESSAMENTO CONCLUÍDO: SINAN %s\n", ANO))
+cat("==============================================================================\n")
+cat(sprintf("Total original: %s registros\n", 
+            format(nrow(sinan), big.mark = ",")))
+cat(sprintf("Após limpeza de idade: %s registros\n", 
+            format(nrow(sinan_filtrado), big.mark = ",")))
+cat(sprintf("Variáveis selecionadas: %d (de %d solicitadas)\n", 
+            ncol(sinan_filtrado), 
+            length(variaveis_interesse)))
+cat(sprintf("\nArquivo salvo: %s\n", arquivo_saida))
+cat("==============================================================================\n")
+cat("\n")
+
+# ==============================================================================
+# INSTRUÇÕES PARA PRÓXIMO ANO
+# ==============================================================================
+cat("PARA PROCESSAR OUTRO ANO:\n")
+cat("1. Acesse: https://opendatasus.saude.gov.br/\n")
+cat("2. Navegue: SINAN → Dengue → CSV\n")
+cat("3. Copie a URL atualizada do ano desejado\n")
+cat("4. Altere as variáveis ANO e URL no início do script\n")
+cat("5. Execute o script novamente\n")
+cat("\n")
+
+cat(" PRÓXIMOS PASSOS:\n")
+cat(" Use este arquivo para cruzamento com dados de vacinação\n")
+cat(" Para adicionar dados fictícios, execute o script:\n")
+cat("  'Juntar Bases do Open Data SUS com Dados Fictícios.R'\n")
+cat("\n")
