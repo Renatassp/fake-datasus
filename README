@@ -23,17 +23,19 @@ Este projeto realiza o download e processamento de dados abertos do Open Data SU
 projeto-vacina-dengue/
 ├── README.md
 ├── scripts/
-│   ├── R/
-│   │   ├── Download Dados de Vacinação (2020-2025).R
-│   │   ├── Consolidar Dados por Ano de vacinação.R
-│   │   ├── Consolidar Base Completa de vacinação (2020-2025).R
-│   │   ├── Download e Processamento Dados SINAN.R
-│   │   └── Juntar Bases do Open Data SUS com Dados Fictícios.R
-│   └── Python/
-│       └── Gerar bases com dados sensíveis fictícios.py
+│    ├── Python/
+│    │   └── Gerar bases com dados sensíveis fictícios.py
+│    └── R/
+│        ├── Download Dados de Vacinação (2020-2025).R
+│        ├── Consolidar Dados por Ano de vacinação.R
+│        ├── Consolidar Base Completa de vacinação (2020-2025).R
+│        ├── Download e Processamento Dados SINAN.R
+│        └── Juntar Bases do Open Data SUS com Dados Fictícios.R
+│   
 └── docs/
     └── dicionario_variaveis.md
 ```
+
 
 ## Como Usar
 
