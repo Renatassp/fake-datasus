@@ -1,0 +1,801 @@
+# ==============================================================================
+# LINKAGE PROBABILÍSTICO - BASES DE VACINAÇÃO E SINAN
+# ==============================================================================
+# Este script realiza linkage probabilístico entre bases de vacinação contra
+# dengue e notificações do SINAN, tratando duplicidades e usando blocking
+# otimizado para grandes volumes de dados
+#
+# Estratégia: Blocking por ANO + PRIMEIRA LETRA para reduzir uso de memória
+# ==============================================================================
+
+#==================================================
+# PREPARAÇÃO E CONFIGURAÇÃO
+#==================================================
+
+# Limpando a memória antes de iniciar
+rm(list = ls()) 
+gc() 
+
+# Carregar pacotes necessários
+library(data.table)   
+library(dplyr)        
+library(fuzzyjoin)    
+library(stringdist)   
+library(stringr)      
+library(stringi)      
+library(lubridate)    
+
+# ==============================================================================
+# CONFIGURAÇÕES - AJUSTE AQUI
+# ==============================================================================
+
+# Pasta base do projeto
+PASTA_BASE <- "~/projeto-vacina-dengue"
+
+# Pastas específicas
+PASTA_DADOS_FINAIS <- file.path(PASTA_BASE, "dados_finais")
+PASTA_RESULTADOS <- file.path(PASTA_BASE, "resultados_linkage")
+
+# Arquivos de entrada (com dados fictícios)
+ARQUIVO_SINAN <- file.path(PASTA_DADOS_FINAIS, "base_sinan_ficticia_para_teste.csv")
+ARQUIVO_VACINA <- file.path(PASTA_DADOS_FINAIS, "base_vacina_ficticia_para_teste.csv")
+
+# Parâmetro de similaridade (0 = idêntico, 1 = completamente diferente)
+MAX_DIST <- 0.2  # Ajuste conforme necessário (0.1 a 0.3 são valores comuns)
+
+# Configurações para big data
+options(timeout = 7200) 
+setDTthreads(0) 
+
+# Criar pasta de resultados
+dir.create(PASTA_RESULTADOS, showWarnings = FALSE, recursive = TRUE)
+
+#==================================================
+# FUNÇÕES AUXILIARES
+#==================================================
+
+# Função para monitorar uso de memória
+check_memory <- function(step) {
+  gc_info <- gc()
+  cat(sprintf("%s - Ncells: %.1f MB | Vcells: %.1f MB\n", 
+              step, gc_info[1,2], gc_info[2,2]))
+}
+
+# Função para limpeza e padronização de strings
+clean_string <- function(x) {
+  x <- iconv(x, from = "latin1", to = "UTF-8")  # Corrige encoding
+  x <- tolower(trimws(x))  # Minúscula e remove espaços
+  x <- stri_trans_general(x, "Latin-ASCII")  # Remove acentos
+  x <- gsub("[^a-z0-9 ]", "", x)  # Remove caracteres especiais
+  x <- gsub("\\s+", " ", x)  # Normaliza espaços múltiplos
+  return(x)
+}
+
+# Função principal de linkage por blocos otimizados
+fazer_linkage_otimizado <- function(df1, df2, nome_bloco, max_dist = 0.2) {
+  cat(sprintf("\n=== PROCESSANDO %s ===\n", toupper(nome_bloco)))
+  
+  # Verificar se há dados
+  if (nrow(df1) == 0 | nrow(df2) == 0) {
+    cat("  AVISO: Um dos datasets está vazio - pulando...\n")
+    return(list())
+  }
+  
+  # Criar cópias para não modificar os originais
+  dt1 <- copy(df1)
+  dt2 <- copy(df2)
+  
+  # Verificar colunas necessárias
+  colunas_necessarias <- c("nome_paciente_clean", "nome_mae_clean", "data_nasc")
+  if (!all(colunas_necessarias %in% names(dt1))) {
+    stop(" ERRO: Colunas necessárias não encontradas em df1")
+  }
+  if (!all(colunas_necessarias %in% names(dt2))) {
+    stop(" ERRO: Colunas necessárias não encontradas em df2")
+  }
+  
+  # Criar variáveis de blocking
+  dt1[, `:=`(
+    ano_nasc = year(data_nasc),
+    primeira_letra = substr(nome_paciente_clean, 1, 1)
+  )]
+  dt2[, `:=`(
+    ano_nasc = year(data_nasc),
+    primeira_letra = substr(nome_paciente_clean, 1, 1)
+  )]
+  
+  # Para registros sem data, usar valor especial
+  dt1[is.na(ano_nasc), ano_nasc := -9999]
+  dt2[is.na(ano_nasc), ano_nasc := -9999]
+  
+  # Tratar primeira_letra vazia ou NA
+  dt1[is.na(primeira_letra) | primeira_letra == "", primeira_letra := "X"]
+  dt2[is.na(primeira_letra) | primeira_letra == "", primeira_letra := "X"]
+  
+  # Criar blocos (ano + primeira letra)
+  dt1[, bloco := paste0(ano_nasc, "_", primeira_letra)]
+  dt2[, bloco := paste0(ano_nasc, "_", primeira_letra)]
+  
+  # Encontrar blocos comuns
+  blocos_comuns <- intersect(unique(dt1$bloco), unique(dt2$bloco))
+  cat(sprintf("✓ Blocos a processar: %d\n", length(blocos_comuns)))
+  
+  if (length(blocos_comuns) == 0) {
+    cat("  ATENÇÃO: Nenhum bloco em comum encontrado!\n")
+    cat("   Verificando distribuição:\n")
+    cat(sprintf("   - Blocos únicos em base 1: %d\n", length(unique(dt1$bloco))))
+    cat(sprintf("   - Blocos únicos em base 2: %d\n", length(unique(dt2$bloco))))
+    cat("   - Primeiros 5 blocos base 1:", 
+        paste(head(unique(dt1$bloco), 5), collapse = ", "), "\n")
+    cat("   - Primeiros 5 blocos base 2:", 
+        paste(head(unique(dt2$bloco), 5), collapse = ", "), "\n")
+    return(list())
+  }
+  
+  resultados_bloco <- list()
+  total_matches_bloco <- 0
+  
+  # Processar cada bloco
+  for (i in seq_along(blocos_comuns)) {
+    bloco_atual <- blocos_comuns[i]
+    
+    # Extrair ano e letra do bloco
+    partes <- strsplit(bloco_atual, "_")[[1]]
+    ano_atual <- partes[1]
+    letra_atual <- partes[2]
+    
+    # Feedback visual a cada 50 blocos
+    if (i %% 50 == 0 | i == 1 | i == length(blocos_comuns)) {
+      cat(sprintf("  Bloco %d/%d: Ano %s, Letra '%s'\n", 
+                  i, length(blocos_comuns), ano_atual, letra_atual))
+    }
+    
+    # Filtrar dados do bloco atual
+    dt1_bloco <- dt1[bloco == bloco_atual]
+    dt2_bloco <- dt2[bloco == bloco_atual]
+    
+    # Mostrar estatísticas do bloco
+    if (i %% 50 == 0 | i == 1) {
+      cat(sprintf("     Registros: %d (base1) × %d (base2) = %s comparações\n",
+                  nrow(dt1_bloco), nrow(dt2_bloco), 
+                  format(as.numeric(nrow(dt1_bloco)) * as.numeric(nrow(dt2_bloco)), 
+                         big.mark = ",")))
+    }
+    
+    # Verificar tamanho do bloco
+    estimativa_comparacoes <- as.numeric(nrow(dt1_bloco)) * as.numeric(nrow(dt2_bloco))
+    
+    if (estimativa_comparacoes > 5000000) {  # 5 milhões
+      cat(sprintf("     AVISO: Bloco %s muito grande (%s comparações)\n", 
+                  bloco_atual, 
+                  format(estimativa_comparacoes, big.mark = ",")))
+    }
+    
+    # Fazer o linkage
+    tryCatch({
+      # Criar data.frames temporários apenas com colunas necessárias
+      temp1 <- as.data.frame(dt1_bloco[, .(nome_paciente_clean, nome_mae_clean)])
+      temp2 <- as.data.frame(dt2_bloco[, .(nome_paciente_clean, nome_mae_clean)])
+      
+      # Adicionar ID para rastreamento
+      temp1$idx1 <- 1:nrow(temp1)
+      temp2$idx2 <- 1:nrow(temp2)
+      
+      # Fazer o join fuzzy (Jaro-Winkler)
+      match_bloco <- stringdist_inner_join(
+        temp1, temp2,
+        by = c("nome_paciente_clean", "nome_mae_clean"),
+        method = "jw",  # Jaro-Winkler
+        max_dist = max_dist,
+        distance_col = "dist"
+      )
+      
+      if (nrow(match_bloco) > 0) {
+        if (i %% 50 == 0 | i == 1) {
+          cat(sprintf("    ✓ OK: Encontrados %d matches!\n", nrow(match_bloco)))
+        }
+        
+        # Recuperar dados completos usando os índices
+        match_completo <- cbind(
+          dt1_bloco[match_bloco$idx1],
+          dt2_bloco[match_bloco$idx2],
+          dist = match_bloco$dist
+        )
+        
+        # Remover colunas temporárias
+        match_completo[, c("ano_nasc", "primeira_letra", "bloco") := NULL]
+        
+        resultados_bloco[[length(resultados_bloco) + 1]] <- match_completo
+        total_matches_bloco <- total_matches_bloco + nrow(match_bloco)
+      }
+      
+      # Limpar objetos temporários para liberar memória
+      rm(temp1, temp2, match_bloco)
+      
+    }, error = function(e) {
+      cat(sprintf("    ERRO no bloco %s: %s\n", bloco_atual, e$message))
+    })
+    
+    # Limpeza de memória a cada 100 blocos
+    if (i %% 100 == 0) {
+      gc(verbose = FALSE)
+    }
+  }
+  
+  cat(sprintf("\n✓ Total matches em %s: %s\n", nome_bloco, 
+              format(total_matches_bloco, big.mark = ",")))
+  return(resultados_bloco)
+}
+
+#==================================================
+# INÍCIO DO PROCESSAMENTO
+#==================================================
+
+cat("\n")
+cat("==============================================================================\n")
+cat("  LINKAGE PROBABILÍSTICO - INÍCIO DO PROCESSAMENTO\n")
+cat("==============================================================================\n")
+cat("\n")
+check_memory("Início")
+
+#==================================================
+# ETAPA 1: CARREGAR E TRATAR DUPLICIDADES NO SINAN
+#==================================================
+
+cat("\n[ETAPA 1/6] CARREGANDO E TRATANDO SINAN\n")
+cat("==============================================================================\n")
+
+# Verificar se arquivo existe
+if(!file.exists(ARQUIVO_SINAN)) {
+  stop(sprintf("\n ERRO: Arquivo não encontrado:\n   %s\n\n", ARQUIVO_SINAN),
+       "   Execute primeiro o script 'Juntar Bases do Open Data SUS com Dados Fictícios.R'\n")
+}
+
+sinan <- fread(ARQUIVO_SINAN)
+cat(sprintf(" SINAN original: %s registros\n", format(nrow(sinan), big.mark = ",")))
+
+# Limpeza de strings
+cat("  Limpando e padronizando strings...\n")
+sinan[, `:=`(
+  nome_paciente = clean_string(nome_paciente),
+  nome_mae = clean_string(nome_mae)
+)]
+
+# Padronizar nomes de colunas (ajuste conforme necessário)
+if("dt_nasc" %in% names(sinan)) {
+  setnames(sinan, "dt_nasc", "data_nasc")
+}
+
+# Converter datas para IDate
+cat("  Convertendo datas...\n")
+colunas_data <- c("data_nasc", "DT_NOTIFIC", "dt_primeiros_sintomas")
+for(col in colunas_data) {
+  if(col %in% names(sinan)) {
+    sinan[, (col) := as.IDate(get(col))]
+  }
+}
+
+# Transformar espaços vazios em NA
+if("numero_sus" %in% names(sinan)) {
+  sinan[numero_sus == "", numero_sus := NA]
+}
+
+# Criar chave determinística e ID de paciente
+cat("  Criando identificadores de paciente...\n")
+sinan[, chave_deterministica := paste(nome_paciente, nome_mae, data_nasc)]
+
+# Criar id_intermediario
+if("numero_sus" %in% names(sinan)) {
+  sinan[, id_intermediario := fifelse(!is.na(numero_sus), numero_sus, chave_deterministica)]
+  
+  # Propagar o mesmo id_paciente
+  id_mapeado_sinan <- unique(sinan[!is.na(numero_sus), .(numero_sus, chave_deterministica)])
+  
+  sinan <- merge(sinan, id_mapeado_sinan, by = "chave_deterministica", 
+                 all.x = TRUE, suffixes = c("", "_mapeado"), allow.cartesian = TRUE)
+  
+  sinan[, id_final := fcase(
+    !is.na(numero_sus), numero_sus,
+    is.na(numero_sus) & !is.na(numero_sus_mapeado), numero_sus_mapeado,
+    default = chave_deterministica
+  )]
+  
+  sinan[, c("id_intermediario", "numero_sus_mapeado") := NULL]
+} else {
+  sinan[, id_final := chave_deterministica]
+}
+
+sinan[, id_paciente := .GRP, by = id_final]
+sinan[, id_final := NULL]
+
+# Remover duplicidades (mantendo primeiro registro por episódio)
+cat("  Removendo duplicidades...\n")
+
+# Criar data de referência
+if("DT_NOTIFIC" %in% names(sinan) & "dt_primeiros_sintomas" %in% names(sinan)) {
+  sinan[, data_referencia := fcase(
+    !is.na(DT_NOTIFIC), DT_NOTIFIC,
+    !is.na(dt_primeiros_sintomas), dt_primeiros_sintomas,
+    default = as.IDate(NA)
+  )]
+} else if("DT_NOTIFIC" %in% names(sinan)) {
+  sinan[, data_referencia := DT_NOTIFIC]
+} else {
+  sinan[, data_referencia := data_nasc]
+}
+
+# Ordenar e calcular diferença
+setorder(sinan, id_paciente, data_referencia, na.last = TRUE)
+sinan[, diff_dias := c(NA, diff(data_referencia)), by = id_paciente]
+
+# Criar grupos de episódios (> 90 dias = novo episódio)
+sinan[, grupo_epi := cumsum(is.na(diff_dias) | is.na(data_referencia) | diff_dias > 90), 
+      by = id_paciente]
+
+# Manter apenas primeiro registro por episódio
+sinan[, manter := seq_len(.N) == 1, by = .(id_paciente, grupo_epi)]
+sinan_sem_duplicados <- sinan[manter == TRUE]
+sinan_sem_duplicados[, c("data_referencia", "diff_dias", "grupo_epi", "manter") := NULL]
+
+cat(sprintf("✓ SINAN sem duplicados: %s registros\n", 
+            format(nrow(sinan_sem_duplicados), big.mark = ",")))
+cat(sprintf("  Duplicados removidos: %s\n", 
+            format(nrow(sinan) - nrow(sinan_sem_duplicados), big.mark = ",")))
+
+check_memory("Após tratamento SINAN")
+
+#==================================================
+# ETAPA 2: CARREGAR E TRATAR DUPLICIDADES NA VACINA
+#==================================================
+
+cat("\n[ETAPA 2/6] CARREGANDO E TRATANDO VACINA\n")
+cat("==============================================================================\n")
+
+# Verificar se arquivo existe
+if(!file.exists(ARQUIVO_VACINA)) {
+  stop(sprintf("\n ERRO: Arquivo não encontrado:\n   %s\n\n", ARQUIVO_VACINA),
+       "   Execute primeiro o script 'Juntar Bases do Open Data SUS com Dados Fictícios.R'\n")
+}
+
+vacina <- fread(ARQUIVO_VACINA)
+cat(sprintf(" VACINA original: %s registros\n", format(nrow(vacina), big.mark = ",")))
+
+# Limpeza de strings
+cat("  Limpando e padronizando strings...\n")
+vacina[, `:=`(
+  nome_paciente = clean_string(nome_paciente),
+  nome_mae = clean_string(nome_mae)
+)]
+
+# Padronizar nomes de colunas
+if("dt_nasc" %in% names(vacina)) {
+  setnames(vacina, "dt_nasc", "data_nasc")
+}
+if("dt_vacina" %in% names(vacina)) {
+  setnames(vacina, "dt_vacina", "data_vacina")
+}
+
+# Converter datas
+cat("  Convertendo datas...\n")
+colunas_data <- c("data_nasc", "data_vacina")
+for(col in colunas_data) {
+  if(col %in% names(vacina)) {
+    vacina[, (col) := as.IDate(get(col))]
+  }
+}
+
+# Transformar espaços vazios em NA
+if("numero_sus" %in% names(vacina)) {
+  vacina[numero_sus == "", numero_sus := NA]
+}
+
+# Criar identificadores
+cat("  Criando identificadores de paciente...\n")
+vacina[, chave_deterministica := paste(nome_paciente, nome_mae, data_nasc)]
+
+if("numero_sus" %in% names(vacina)) {
+  vacina[, id_intermediario := fifelse(!is.na(numero_sus), numero_sus, chave_deterministica)]
+  
+  id_mapeado_vacina <- unique(vacina[!is.na(numero_sus), .(numero_sus, chave_deterministica)])
+  
+  vacina <- merge(vacina, id_mapeado_vacina, by = "chave_deterministica", 
+                  all.x = TRUE, suffixes = c("", "_mapeado"), allow.cartesian = TRUE)
+  
+  vacina[, id_final := fcase(
+    !is.na(numero_sus), numero_sus,
+    is.na(numero_sus) & !is.na(numero_sus_mapeado), numero_sus_mapeado,
+    default = chave_deterministica
+  )]
+  
+  vacina[, c("id_intermediario", "numero_sus_mapeado") := NULL]
+} else {
+  vacina[, id_final := chave_deterministica]
+}
+
+vacina[, id_paciente := .GRP, by = id_final]
+vacina[, id_final := NULL]
+
+# Remover duplicidades (mantendo doses diferentes)
+cat("  Removendo duplicidades...\n")
+
+if("data_vacina" %in% names(vacina)) {
+  setorder(vacina, id_paciente, data_vacina)
+  vacina[, diff_dias := c(NA, diff(data_vacina)), by = id_paciente]
+  vacina[, grupo_epi := cumsum(is.na(diff_dias) | diff_dias >= 90), by = id_paciente]
+} else {
+  vacina[, grupo_epi := 1]
+}
+
+vacina[, manter := seq_len(.N) == 1, by = .(id_paciente, grupo_epi)]
+vacina_sem_duplicados <- vacina[manter == TRUE]
+
+# Adicionar número da dose
+vacina_sem_duplicados[, numero_dose := seq_len(.N), by = id_paciente]
+vacina_sem_duplicados[, c("diff_dias", "grupo_epi", "manter") := NULL]
+
+cat(sprintf("✓ VACINA sem duplicados: %s registros\n", 
+            format(nrow(vacina_sem_duplicados), big.mark = ",")))
+cat(sprintf("  Duplicados removidos: %s\n", 
+            format(nrow(vacina) - nrow(vacina_sem_duplicados), big.mark = ",")))
+
+# Estatísticas de doses
+cat("\n  Distribuição de doses por paciente:\n")
+dist_doses <- table(vacina_sem_duplicados[, .N, by = id_paciente]$N)
+print(dist_doses)
+
+check_memory("Após tratamento VACINA")
+
+# Salvar bases sem duplicados
+cat("\n  Salvando bases sem duplicados...\n")
+fwrite(sinan_sem_duplicados, 
+       file.path(PASTA_RESULTADOS, "sinan_sem_duplicados.csv"), 
+       sep = ";")
+fwrite(vacina_sem_duplicados, 
+       file.path(PASTA_RESULTADOS, "vacina_sem_duplicados.csv"), 
+       sep = ";")
+
+#==================================================
+# ETAPA 3: PREPARAÇÃO PARA LINKAGE
+#==================================================
+
+cat("\n[ETAPA 3/6] PREPARANDO PARA LINKAGE\n")
+cat("==============================================================================\n")
+
+# Criar variáveis limpas para linkage
+cat("  Criando variáveis padronizadas...\n")
+sinan_sem_duplicados[, `:=`(
+  nome_paciente_clean = clean_string(nome_paciente),
+  nome_mae_clean = clean_string(nome_mae)
+)]
+
+vacina_sem_duplicados[, `:=`(
+  nome_paciente_clean = clean_string(nome_paciente),
+  nome_mae_clean = clean_string(nome_mae)
+)]
+
+# Criar IDs temporários para rastreamento
+sinan_sem_duplicados[, id_sinan := .I]
+vacina_sem_duplicados[, id_vacina := .I]
+
+# Separar dados com e sem data de nascimento
+cat("  Separando dados por disponibilidade de data...\n")
+sinan_com_data <- sinan_sem_duplicados[!is.na(data_nasc)]
+vacina_com_data <- vacina_sem_duplicados[!is.na(data_nasc)]
+sinan_sem_data <- sinan_sem_duplicados[is.na(data_nasc)]
+vacina_sem_data <- vacina_sem_duplicados[is.na(data_nasc)]
+
+cat("\n ESTATÍSTICAS:\n")
+cat(sprintf("  SINAN com data: %s registros\n", 
+            format(nrow(sinan_com_data), big.mark = ",")))
+cat(sprintf("  VACINA com data: %s registros\n", 
+            format(nrow(vacina_com_data), big.mark = ",")))
+cat(sprintf("  SINAN sem data: %s registros\n", 
+            format(nrow(sinan_sem_data), big.mark = ",")))
+cat(sprintf("  VACINA sem data: %s registros\n", 
+            format(nrow(vacina_sem_data), big.mark = ",")))
+
+check_memory("Após preparação")
+
+# Diagnóstico pré-linkage
+if(nrow(sinan_com_data) > 0 & nrow(vacina_com_data) > 0) {
+  cat("\n DIAGNÓSTICO PRÉ-LINKAGE:\n")
+  
+  cat("\n  Exemplo SINAN (3 primeiras linhas):\n")
+  print(sinan_com_data[1:min(3, nrow(sinan_com_data)), 
+                       .(nome_paciente_clean, nome_mae_clean, data_nasc)])
+  
+  cat("\n  Exemplo VACINA (3 primeiras linhas):\n")
+  print(vacina_com_data[1:min(3, nrow(vacina_com_data)), 
+                        .(nome_paciente_clean, nome_mae_clean, data_nasc)])
+  
+  cat("\n  Distribuição de anos de nascimento:\n")
+  anos_sinan <- year(sinan_com_data$data_nasc)
+  anos_vacina <- year(vacina_com_data$data_nasc)
+  cat(sprintf("    SINAN - Anos únicos: %d\n", length(unique(anos_sinan))))
+  cat(sprintf("    VACINA - Anos únicos: %d\n", length(unique(anos_vacina))))
+  cat(sprintf("    Anos em comum: %d\n", 
+              length(intersect(unique(anos_sinan), unique(anos_vacina)))))
+  
+  cat("\n  Primeiras letras dos nomes:\n")
+  letras_sinan <- substr(sinan_com_data$nome_paciente_clean, 1, 1)
+  letras_vacina <- substr(vacina_com_data$nome_paciente_clean, 1, 1)
+  cat(sprintf("    SINAN - Letras únicas: %d\n", length(unique(letras_sinan))))
+  cat(sprintf("    VACINA - Letras únicas: %d\n", length(unique(letras_vacina))))
+  cat(sprintf("    Letras em comum: %d\n", 
+              length(intersect(unique(letras_sinan), unique(letras_vacina)))))
+}
+
+#==================================================
+# ETAPA 4: LINKAGE PROBABILÍSTICO
+#==================================================
+
+cat("\n[ETAPA 4/6] LINKAGE PROBABILÍSTICO\n")
+cat("==============================================================================\n")
+cat(sprintf("Parâmetro de distância máxima: %.2f\n", MAX_DIST))
+
+todos_resultados <- list()
+
+# 1. SINAN com data × VACINA com data
+if(nrow(sinan_com_data) > 0 & nrow(vacina_com_data) > 0) {
+  resultados_com_data <- fazer_linkage_otimizado(
+    sinan_com_data, vacina_com_data, 
+    "SINAN com data × VACINA com data", 
+    max_dist = MAX_DIST
+  )
+  
+  if(length(resultados_com_data) > 0) {
+    todos_resultados <- c(todos_resultados, resultados_com_data)
+  }
+  
+  check_memory("Após linkage com data")
+}
+
+# 2. SINAN sem data × VACINA sem data
+if(nrow(sinan_sem_data) > 0 & nrow(vacina_sem_data) > 0) {
+  resultados_sem_data <- fazer_linkage_otimizado(
+    sinan_sem_data, vacina_sem_data, 
+    "SINAN sem data × VACINA sem data", 
+    max_dist = MAX_DIST
+  )
+  
+  if(length(resultados_sem_data) > 0) {
+    todos_resultados <- c(todos_resultados, resultados_sem_data)
+  }
+  
+  check_memory("Após linkage sem data")
+}
+
+#==================================================
+# ETAPA 5: CONSOLIDAÇÃO E SALVAMENTO
+#==================================================
+
+cat("\n[ETAPA 5/6] CONSOLIDANDO RESULTADOS\n")
+cat("==============================================================================\n")
+cat(sprintf("Total de blocos processados: %d\n", length(todos_resultados)))
+
+if(length(todos_resultados) > 0) {
+  resultado_linkage_probabilistico <- rbindlist(todos_resultados, fill = TRUE)
+  
+  # Remover colunas temporárias
+  cols_remover <- c("nome_paciente_clean.x", "nome_mae_clean.x",
+                    "nome_paciente_clean.y", "nome_mae_clean.y",
+                    "ano_nasc", "primeira_letra", "bloco")
+  
+  cols_existentes <- intersect(cols_remover, names(resultado_linkage_probabilistico))
+  if(length(cols_existentes) > 0) {
+    resultado_linkage_probabilistico[, (cols_existentes) := NULL]
+  }
+  
+  cat(sprintf("✓ Resultado final: %s matches\n", 
+              format(nrow(resultado_linkage_probabilistico), big.mark = ",")))
+  
+  # Identificar registros pareados
+  ids_pareados_sinan <- unique(resultado_linkage_probabilistico$id_sinan)
+  ids_pareados_vacina <- unique(resultado_linkage_probabilistico$id_vacina)
+  
+  cat(sprintf("  IDs únicos SINAN pareados: %s\n", 
+              format(length(ids_pareados_sinan), big.mark = ",")))
+  cat(sprintf("  IDs únicos VACINA pareados: %s\n", 
+              format(length(ids_pareados_vacina), big.mark = ",")))
+  
+  # Filtrar não pareados
+  sinan_nao_pareados <- sinan_sem_duplicados[!id_sinan %in% ids_pareados_sinan]
+  vacina_nao_pareados <- vacina_sem_duplicados[!id_vacina %in% ids_pareados_vacina]
+  
+} else {
+  cat("  NENHUM MATCH ENCONTRADO!\n")
+  resultado_linkage_probabilistico <- data.table()
+  sinan_nao_pareados <- sinan_sem_duplicados
+  vacina_nao_pareados <- vacina_sem_duplicados
+  ids_pareados_sinan <- integer(0)
+  ids_pareados_vacina <- integer(0)
+}
+
+# Limpar colunas auxiliares
+sinan_sem_duplicados[, c("nome_paciente_clean", "nome_mae_clean", "id_sinan") := NULL]
+vacina_sem_duplicados[, c("nome_paciente_clean", "nome_mae_clean", "id_vacina") := NULL]
+sinan_nao_pareados[, c("nome_paciente_clean", "nome_mae_clean", "id_sinan") := NULL]
+vacina_nao_pareados[, c("nome_paciente_clean", "nome_mae_clean", "id_vacina") := NULL]
+
+if(ncol(resultado_linkage_probabilistico) > 0) {
+  resultado_linkage_probabilistico[, c("id_sinan", "id_vacina") := NULL]
+}
+
+check_memory("Após consolidação")
+
+#==================================================
+# ETAPA 6: SALVAR RESULTADOS
+#==================================================
+
+cat("\n[ETAPA 6/6] SALVANDO RESULTADOS\n")
+cat("==============================================================================\n")
+
+# 1. Salvar matches (se houver)
+if(nrow(resultado_linkage_probabilistico) > 0) {
+  arquivo_matches <- file.path(PASTA_RESULTADOS, 
+                               "resultados_linkage_probabilistico.csv")
+  fwrite(resultado_linkage_probabilistico, arquivo_matches, sep = ";")
+  cat(sprintf("✓ Matches salvos: %s\n", basename(arquivo_matches)))
+  cat(sprintf("  Total: %s registros\n", 
+              format(nrow(resultado_linkage_probabilistico), big.mark = ",")))
+}
+
+# 2. Salvar SINAN não pareados
+arquivo_sinan_nao_pareados <- file.path(PASTA_RESULTADOS, 
+                                        "sinan_nao_pareados.csv")
+fwrite(sinan_nao_pareados, arquivo_sinan_nao_pareados, sep = ";")
+cat(sprintf("\n✓ SINAN não pareados salvos: %s\n", 
+            basename(arquivo_sinan_nao_pareados)))
+cat(sprintf("  Total: %s registros\n", 
+            format(nrow(sinan_nao_pareados), big.mark = ",")))
+
+# 3. Salvar VACINA não pareados
+arquivo_vacina_nao_pareados <- file.path(PASTA_RESULTADOS, 
+                                         "vacina_nao_pareados.csv")
+fwrite(vacina_nao_pareados, arquivo_vacina_nao_pareados, sep = ";")
+cat(sprintf("\n✓ VACINA não pareados salvos: %s\n", 
+            basename(arquivo_vacina_nao_pareados)))
+cat(sprintf("  Total: %s registros\n", 
+            format(nrow(vacina_nao_pareados), big.mark = ",")))
+
+#==================================================
+# RELATÓRIO FINAL
+#==================================================
+
+cat("\n")
+cat("==============================================================================\n")
+cat("  RELATÓRIO FINAL DO LINKAGE\n")
+cat("==============================================================================\n")
+cat("\n")
+
+cat(" BASES PROCESSADAS:\n")
+cat(sprintf("  SINAN (sem duplicados): %s registros\n", 
+            format(nrow(sinan_sem_duplicados), big.mark = ",")))
+cat(sprintf("  VACINA (sem duplicados): %s registros\n", 
+            format(nrow(vacina_sem_duplicados), big.mark = ",")))
+
+cat("\n RESULTADOS DO LINKAGE:\n")
+cat(sprintf("  Matches encontrados: %s\n", 
+            format(nrow(resultado_linkage_probabilistico), big.mark = ",")))
+cat(sprintf("  SINAN não pareados: %s\n", 
+            format(nrow(sinan_nao_pareados), big.mark = ",")))
+cat(sprintf("  VACINA não pareados: %s\n", 
+            format(nrow(vacina_nao_pareados), big.mark = ",")))
+
+if(length(ids_pareados_sinan) > 0) {
+  taxa_sinan <- round(length(ids_pareados_sinan) / nrow(sinan_sem_duplicados) * 100, 2)
+  taxa_vacina <- round(length(ids_pareados_vacina) / nrow(vacina_sem_duplicados) * 100, 2)
+  
+  cat("\n TAXAS DE LINKAGE:\n")
+  cat(sprintf("  Taxa de linkage SINAN: %.2f%%\n", taxa_sinan))
+  cat(sprintf("  Taxa de linkage VACINA: %.2f%%\n", taxa_vacina))
+  
+  cat("\n ESTATÍSTICAS DE DISTÂNCIA (Jaro-Winkler):\n")
+  cat("  Distribuição das distâncias dos matches:\n")
+  print(summary(resultado_linkage_probabilistico$dist))
+  
+  # Estatísticas adicionais de qualidade
+  cat("\n  Qualidade dos matches:\n")
+  dist_excelente <- sum(resultado_linkage_probabilistico$dist <= 0.1)
+  dist_boa <- sum(resultado_linkage_probabilistico$dist > 0.1 & 
+                   resultado_linkage_probabilistico$dist <= 0.2)
+  dist_aceitavel <- sum(resultado_linkage_probabilistico$dist > 0.2)
+  
+  cat(sprintf("    Excelente (≤ 0.10): %s (%.1f%%)\n", 
+              format(dist_excelente, big.mark = ","),
+              (dist_excelente/nrow(resultado_linkage_probabilistico))*100))
+  cat(sprintf("    Boa (0.11-0.20): %s (%.1f%%)\n", 
+              format(dist_boa, big.mark = ","),
+              (dist_boa/nrow(resultado_linkage_probabilistico))*100))
+  cat(sprintf("    Aceitável (> 0.20): %s (%.1f%%)\n", 
+              format(dist_aceitavel, big.mark = ","),
+              (dist_aceitavel/nrow(resultado_linkage_probabilistico))*100))
+  
+} else {
+  cat("\n  Taxa de linkage SINAN: 0%\n")
+  cat("  Taxa de linkage VACINA: 0%\n")
+  cat("\nNenhum match foi encontrado. Possíveis causas:\n")
+  cat("  Parâmetro MAX_DIST muito restritivo (atual: ", MAX_DIST, ")\n")
+  cat("  Dados muito diferentes entre as bases\n")
+  cat("  Problemas na padronização dos nomes\n")
+  cat("  Datas de nascimento incompatíveis\n")
+}
+
+cat("\n ARQUIVOS SALVOS EM:\n")
+cat(sprintf("  %s\n", PASTA_RESULTADOS))
+cat("\n  Arquivos criados:\n")
+if(nrow(resultado_linkage_probabilistico) > 0) {
+  cat("     resultados_linkage_probabilistico.csv\n")
+}
+cat("     sinan_nao_pareados.csv\n")
+cat("     vacina_nao_pareados.csv\n")
+cat("     sinan_sem_duplicados.csv\n")
+cat("     vacina_sem_duplicados.csv\n")
+
+check_memory("Final")
+
+cat("\n")
+cat("==============================================================================\n")
+cat("   PROCESSAMENTO CONCLUÍDO COM SUCESSO!\n")
+cat("==============================================================================\n")
+cat("\n")
+
+cat(" PRÓXIMOS PASSOS:\n")
+cat("  1. Revise os resultados em 'resultados_linkage_probabilistico.csv'\n")
+cat("  2. Avalie a qualidade dos matches pela coluna 'dist'\n")
+cat("  3. Analise os casos não pareados para identificar padrões\n")
+cat("  4. Ajuste o parâmetro MAX_DIST se necessário e execute novamente\n")
+cat("\n")
+cat(" INTERPRETAÇÃO DA DISTÂNCIA:\n")
+cat(" 0.00 - 0.10: Match excelente (muito similar)\n")
+cat(" 0.11 - 0.20: Match bom (similar)\n")
+cat(" 0.21 - 0.30: Match aceitável (moderadamente similar)\n")
+cat(" > 0.30: Revisar manualmente\n")
+cat("\n")
+
+# Gerar relatório resumido em TXT
+cat("\n Gerando relatório resumido...\n")
+arquivo_relatorio <- file.path(PASTA_RESULTADOS, "relatorio_linkage.txt")
+
+sink(arquivo_relatorio)
+cat("==============================================================================\n")
+cat("  RELATÓRIO DE LINKAGE PROBABILÍSTICO\n")
+cat(sprintf("  Data: %s\n", Sys.time()))
+cat("==============================================================================\n\n")
+
+cat("PARÂMETROS:\n")
+cat(sprintf("  Distância máxima (MAX_DIST): %.2f\n", MAX_DIST))
+cat(sprintf("  Método: Jaro-Winkler\n"))
+cat(sprintf("  Estratégia: Blocking por Ano + Primeira Letra\n\n"))
+
+cat("BASES PROCESSADAS:\n")
+cat(sprintf("  SINAN (sem duplicados): %s registros\n", 
+            format(nrow(sinan_sem_duplicados), big.mark = ",")))
+cat(sprintf("  VACINA (sem duplicados): %s registros\n\n", 
+            format(nrow(vacina_sem_duplicados), big.mark = ",")))
+
+cat("RESULTADOS:\n")
+cat(sprintf("  Matches encontrados: %s\n", 
+            format(nrow(resultado_linkage_probabilistico), big.mark = ",")))
+cat(sprintf("  SINAN não pareados: %s\n", 
+            format(nrow(sinan_nao_pareados), big.mark = ",")))
+cat(sprintf("  VACINA não pareados: %s\n\n", 
+            format(nrow(vacina_nao_pareados), big.mark = ",")))
+
+if(length(ids_pareados_sinan) > 0) {
+  cat("TAXAS DE LINKAGE:\n")
+  cat(sprintf("  SINAN: %.2f%%\n", taxa_sinan))
+  cat(sprintf("  VACINA: %.2f%%\n\n", taxa_vacina))
+  
+  cat("QUALIDADE DOS MATCHES:\n")
+  cat(sprintf("  Distância mínima: %.4f\n", min(resultado_linkage_probabilistico$dist)))
+  cat(sprintf("  Distância média: %.4f\n", mean(resultado_linkage_probabilistico$dist)))
+  cat(sprintf("  Distância máxima: %.4f\n", max(resultado_linkage_probabilistico$dist)))
+}
+
+cat("\n==============================================================================\n")
+sink()
+
+cat(sprintf("✓ Relatório salvo: %s\n", basename(arquivo_relatorio)))
+
+cat("\n🎉 Script finalizado!\n\n")
