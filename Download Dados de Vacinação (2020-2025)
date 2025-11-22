@@ -1,0 +1,194 @@
+# ==============================================================================
+# DOWNLOAD DADOS DE VACINAÇÃO (2020-2025) - OPEN DATA SUS
+# ==============================================================================
+# Este script baixa dados de vacinação do Open Data SUS mês a mês,
+# filtra apenas vacinas contra dengue e remove duplicados.
+#
+# IMPORTANTE: 
+# O Open Data SUS disponibiliza dados gerais de TODAS as vacinas por mês
+# Os dados sofrem atualizações/revisões constantes
+# A URL deve ser atualizada no site antes de cada download
+# Execute este código para CADA mês desejado, alterando mês/ano e URL
+#
+# URL do Open Data SUS: https://opendatasus.saude.gov.br/
+# ==============================================================================
+
+# Carregar pacotes necessários
+library(data.table)
+library(R.utils)
+library(dplyr)
+library(bit64)
+
+# Aumentando o tempo para extração, pois o arquivo é grande
+options(timeout = 3600)
+
+# ==============================================================================
+# CONFIGURAÇÕES - AJUSTE AQUI PARA CADA MÊS
+# ==============================================================================
+
+# ATENÇÃO: Atualize estas informações para cada mês que deseja baixar!
+
+# Mês e ano desejado (exemplo: "jan" e "2020")
+MES <- "jan"
+ANO <- "2020"
+
+# URL do arquivo ZIP - ATUALIZE NO SITE DO OPEN DATA SUS!
+# Acesse: https://opendatasus.saude.gov.br/ e copie a URL atual
+URL <- "https://arquivosdadosabertos.saude.gov.br/dados/dbbni/vacinacao_jan_2020.zip"
+
+# Pasta onde salvar os arquivos processados
+# AJUSTE para o caminho do SEU computador
+PASTA_SAIDA <- "~/projeto-vacina-dengue/dados_brutos"
+
+# ==============================================================================
+# PROCESSAMENTO - NÃO PRECISA ALTERAR DAQUI PRA BAIXO
+# ==============================================================================
+
+cat("\n")
+cat("==============================================================================\n")
+cat(sprintf("  PROCESSANDO: %s/%s\n", toupper(MES), ANO))
+cat("==============================================================================\n")
+cat(sprintf("URL: %s\n", URL))
+cat("\n")
+
+# Criar pasta de saída se não existir
+dir.create(PASTA_SAIDA, showWarnings = FALSE, recursive = TRUE)
+
+# 1. DOWNLOAD DO ARQUIVO
+cat("[1/7] Baixando arquivo ZIP...\n")
+temp_dir <- tempdir()
+nome_zip <- sprintf("vacinacao_%s_%s.zip", MES, ANO)
+temp_zip <- file.path(temp_dir, nome_zip)
+
+download.file(URL, temp_zip, mode = "wb")
+cat("✓ Download concluído\n\n")
+
+# 2. EXTRAIR CSV DO ZIP
+cat("[2/7] Extraindo arquivo CSV...\n")
+arquivos_no_zip <- unzip(temp_zip, list = TRUE)
+csv_file <- arquivos_no_zip$Name[grepl("\\.csv$", arquivos_no_zip$Name)]
+temp_csv <- unzip(temp_zip, files = csv_file, exdir = temp_dir)
+cat("✓ Arquivo extraído\n\n")
+
+# 3. LER DADOS
+cat("[3/7] Lendo dados de vacinação...\n")
+cat("Aguarde, este processo pode demorar alguns minutos...\n")
+
+vacinacao <- fread(temp_csv, encoding = "Latin-1") %>%
+  mutate(across(where(is.character), ~ iconv(., from = "Latin1", to = "UTF-8")))
+
+cat(sprintf("✓ Total de registros lidos: %s\n", format(nrow(vacinacao), big.mark = ",")))
+cat(sprintf("✓ Total de variáveis: %d\n\n", ncol(vacinacao)))
+
+# 4. VERIFICAR SIGLAS DE VACINAS DISPONÍVEIS
+cat("[4/7] Verificando vacinas disponíveis...\n")
+siglas_unicas <- unique(vacinacao$sg_vacina)
+cat(sprintf("Total de vacinas diferentes: %d\n", length(siglas_unicas)))
+cat("Primeiras 10 siglas encontradas:\n")
+print(head(siglas_unicas, 10))
+cat("\n")
+
+# 5. FILTRAR VACINAS CONTRA DENGUE
+cat("[5/7] Filtrando vacinas contra dengue...\n")
+
+# Procurar por "Dengue" ou "DNG" (pode variar conforme o período)
+dg <- vacinacao %>%
+  filter(sg_vacina %in% c("Dengue", "DNG"))
+
+cat(sprintf("✓ Registros de dengue encontrados: %s\n", format(nrow(dg), big.mark = ",")))
+
+# Verificar se encontrou dados
+if(nrow(dg) == 0) {
+  cat("\n AVISO: Nenhum registro de dengue encontrado!\n")
+  cat("   Possíveis motivos:\n")
+  cat("   Vacina ainda não disponível neste período\n")
+  cat("   Sigla diferente no sistema (verifique as siglas acima)\n")
+  cat("   Arquivo não contém dados de dengue\n\n")
+  stop("Processo interrompido - sem dados de dengue")
+}
+cat("\n")
+
+# 6. REMOVER DUPLICADOS
+cat("[6/7] Removendo registros duplicados...\n")
+
+# Verificar duplicados pela coluna co_paciente
+tem_duplicados <- any(duplicated(dg$co_paciente))
+n_duplicados <- sum(duplicated(dg$co_paciente) | 
+                    duplicated(dg$co_paciente, fromLast = TRUE))
+
+cat(sprintf("Duplicados encontrados: %s\n", ifelse(tem_duplicados, "SIM", "NÃO")))
+cat(sprintf("Total de ocorrências duplicadas: %s\n", format(n_duplicados, big.mark = ",")))
+
+# Verificar formato da data
+cat(sprintf("Formato da variável dt_vacina: %s\n", class(dg$dt_vacina)))
+
+# Remover duplicados mantendo registro com data mais ANTIGA
+cat("Removendo duplicados (mantendo registro mais antigo)...\n")
+dg_sem_duplicados <- dg %>%
+  group_by(co_paciente) %>%
+  arrange(dt_vacina) %>%  # Ordena do mais antigo para o mais recente
+  filter(row_number() == 1) %>%  # Mantém apenas o primeiro (mais antigo)
+  ungroup()
+
+cat(sprintf("✓ Registros após remoção: %s\n", format(nrow(dg_sem_duplicados), big.mark = ",")))
+cat(sprintf("  Removidos: %s registros duplicados\n", 
+            format(nrow(dg) - nrow(dg_sem_duplicados), big.mark = ",")))
+cat("\n")
+
+# 7. SELECIONAR VARIÁVEIS DE INTERESSE
+cat("[7/7] Selecionando variáveis de interesse e salvando...\n")
+
+dg_filtrado <- dg_sem_duplicados %>%
+  select(
+    co_documento, co_paciente, tp_sexo_paciente, co_raca_cor_paciente,
+    no_raca_cor_paciente, co_municipio_paciente, sg_uf_paciente,
+    co_cnes_estabelecimento, co_municipio_estabelecimento, sg_uf_estabelecimento,
+    co_vacina, sg_vacina, dt_vacina, co_dose_vacina,
+    ds_vacina_fabricante, ds_tipo_estabelecimento,
+    co_natureza_estabelecimento, nu_idade_paciente, ds_natureza_estabelecimento
+  )
+
+# Salvar arquivo processado
+nome_saida <- sprintf("dg_%s_%s_filtrado.csv", MES, ANO)
+arquivo_saida <- file.path(PASTA_SAIDA, nome_saida)
+
+fwrite(dg_filtrado, file = arquivo_saida, sep = ";")
+
+tamanho_mb <- file.size(arquivo_saida) / (1024^2)
+
+cat(sprintf("✓ Arquivo salvo: %s\n", nome_saida))
+cat(sprintf("  Local: %s\n", arquivo_saida))
+cat(sprintf("  Tamanho: %.2f MB\n", tamanho_mb))
+cat(sprintf("  Linhas: %s\n", format(nrow(dg_filtrado), big.mark = ",")))
+cat(sprintf("  Colunas: %d\n", ncol(dg_filtrado)))
+
+# Limpar arquivos temporários
+unlink(temp_zip)
+unlink(temp_csv)
+
+# RESUMO FINAL
+cat("\n")
+cat("==============================================================================\n")
+cat(sprintf("  ✓ PROCESSAMENTO CONCLUÍDO: %s/%s\n", toupper(MES), ANO))
+cat("==============================================================================\n")
+cat(sprintf("Total original: %s registros (todas as vacinas)\n", 
+            format(nrow(vacinacao), big.mark = ",")))
+cat(sprintf("Filtro dengue: %s registros\n", 
+            format(nrow(dg), big.mark = ",")))
+cat(sprintf("Após remoção de duplicados: %s registros\n", 
+            format(nrow(dg_filtrado), big.mark = ",")))
+cat(sprintf("\nArquivo salvo: %s\n", arquivo_saida))
+cat("==============================================================================\n")
+cat("\n")
+
+# ==============================================================================
+# INSTRUÇÕES PARA PRÓXIMO MÊS
+# ==============================================================================
+cat("PARA PROCESSAR OUTRO MÊS:\n")
+cat("1. Acesse: https://opendatasus.saude.gov.br/\n")
+cat("2. Copie a URL atualizada do mês desejado\n")
+cat("3. Altere as variáveis MES, ANO e URL no início do script\n")
+cat("4. Execute o script novamente\n")
+cat("\n")
+
+# }
