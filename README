@@ -30,7 +30,8 @@ projeto-vacina-dengue/
 │        ├── Consolidar Dados por Ano de vacinação.R
 │        ├── Consolidar Base Completa de vacinação (2020-2025).R
 │        ├── Download e Processamento Dados SINAN.R
-│        └── Juntar Bases do Open Data SUS com Dados Fictícios.R
+│        ├── Juntar Bases do Open Data SUS com Dados Fictícios.R   
+│        └── Linkage
 │   
 └── docs/
     └── dicionario_variaveis.md
